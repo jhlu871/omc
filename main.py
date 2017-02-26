@@ -83,7 +83,8 @@ print(df.message_type.unique())
 
 ''' Ok, now that we've got all the ambiguities out of the way, we can
 start working on the given problems'''
-
+# Create a column of python datetime objects based on timestamp
+df['dt'] = df.timestamp.apply(lambda x: datetime.datetime.fromtimestamp(x/1e9))
 
 def get_latencies(df,sent_msg_type):
     ''' Parameters
@@ -126,7 +127,19 @@ def get_latencies(df,sent_msg_type):
     
     # NOTE: may take some time depending on hardware
     # takes about 3 minutes on my old laptop
-    latencies = df1.groupby('clordid').timestamp.diff().dropna()
+    df1['latencies'] = df1.groupby('clordid').timestamp.diff()
+    
+    #latencies = df1.groupby('clordid').timestamp.diff().dropna()
+    
+    # randomly test a few of the calculations to make sure behavior is 
+    # correct
+    test_ids = np.random.choice(df1[~df1.latencies.isnull()].clordid,5)
+    for test in test_ids:
+        msgs = df1[df1.clordid==test]
+        time_delta = msgs.iloc[1].timestamp - msgs.iloc[0].timestamp
+        assert(msgs.iloc[1].latencies == time_delta)  
+        
+
     
     # Ideally there should be an equal number of sent and received messages
     # but that's not the case. Since we are dropping any unmatched messages
@@ -141,11 +154,11 @@ def get_latencies(df,sent_msg_type):
     print('%i msgs dropped' % abs(num_sent-num_received))
     print('%0.2f Percent dropped' % 
           (100*abs(num_sent-num_received)/max(num_sent,num_received)))
-    return latencies
+    return df1
 
-order_latencies = get_latencies(df,'New')
-replace_latencies = get_latencies(df,'Replace')
-cancel_latencies = get_latencies(df,'Cancel')
+alldata_new = get_latencies(df,'New')
+alldata_replace = get_latencies(df,'Replace')
+alldata_cancel = get_latencies(df,'Cancel')
 
 
 def display_stats(data,typ):
@@ -159,7 +172,7 @@ def display_stats(data,typ):
         '''
         
     #Change to see other percentiles
-    percentiles = [25,50,75]
+    percentiles = [25,50,75,90,95]
     print('Statistics for %s Messages' % typ)
     print('Mean: %.2f' % data.mean())
     print('Median: %i' % data.median())
@@ -174,11 +187,33 @@ def display_stats(data,typ):
           'larger than the mean: %.2f%%' % tail)
     print('# of stds max latency is away from mean: %.2f' % 
           ((data.max()-data.mean())/data.std()))
-display_stats(order_latencies,'New')
-display_stats(replace_latencies,'Replace')
-display_stats(cancel_latencies,'Cancel')
+display_stats(alldata_new.latencies.dropna(),'New')
+display_stats(alldata_replace.latencies.dropna(),'Replace')
+display_stats(alldata_cancel.latencies.dropna(),'Cancel')
 
-# Create a column of python datetime objects based on timestamp
-df['dt'] = df.timestamp.apply(lambda x: datetime.datetime.fromtimestamp(x/1e9))
+
 # use Pandas time aware rolling window to aggregate over rolling 1s
-df['msg_counts']=df.rolling('1s',on='datetime')['timestamp'].count()
+df['msg_counts']=df.rolling('1s',on='dt')['timestamp'].count()
+
+display_stats(df.msg_counts, 'Rolling One Second')
+#plot indicates that throughout the day there were numerous spikes of activity
+# ranging between 1000 and 5000 msgs per second and one massive
+# spike at the close of over 20000 msgs per second
+df.msg_counts.plot()
+
+medium_spike = df[(df.msg_counts > 1000) & (df.msg_counts < 10000)]
+large_spike = df[df.msg_counts >= 10000]
+
+medium_new = get_latencies(medium_spike,'New')
+medium_replace = get_latencies(medium_spike,'Replace')
+medium_cancel = get_latencies(medium_spike,'Cancel')
+
+large_new = get_latencies(large_spike,'New')
+large_replace = get_latencies(large_spike,'Replace')
+large_cancel = get_latencies(large_spike,'Cancel')
+
+# compile a pandas dataframe of all stats for all types
+#check if rolling window is forward or backwardsa
+plt.plot(a)
+plt.axhline(y=1000)
+plt.show()
