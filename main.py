@@ -12,22 +12,28 @@ Assumptions:
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from tempfile import TemporaryFile
 import datetime
 
-''' Tried to load data into pandas dataframe using load_csv function,
-This fails initially because the csv file only contains six column headers,
-but some rows contain an 'UNDEF' value in the seventh column followed
-by an additional comma (essentially eight columns, last one being blank).
-I resolved this by manually appending dummy headers of x1 and x2 to the 
-first row of the csv file for columns 7 and 8 (consider it 
-preprocessing or cleaning) so that read_csv works. This problem could 
-also be resolved programatically, but it's much simpler to just do it 
-once manually (Occam's Razor)'''
-
-
-''' PLEASE READ LONG COMMENT ABOVE AND TAKE SAME ACTION
- OR CODE WILL NOT WORK!!!!!'''
-df = pd.read_csv('takehome.csv')
+# Only six column headers are given, but some rows imply 8 fields
+# We need to clean the file through a temporary file to read it with Pandas
+with open('takehome.csv') as f, TemporaryFile('w+') as t:
+    # write all lines to a temp file while finding maximum number
+    # of fields
+    max_fields = 0
+    for line in f:
+        t.write(line)
+        max_fields = np.max([max_fields,len(line.split(','))])
+    # send cursor back to first line of temp file
+    t.seek(0)
+    header = t.readline().strip().split(',')
+    # add dummy column headers
+    i = 1
+    while len(header) < max_fields:
+        header += ['x' + str(i)]
+        i += 1
+    # read temp file as pandas DataFrame
+    df = pd.read_csv(t,names=header)
 
 #confirm that the eighth column is all empty and drop it
 if (sum(~df.x2.isnull())==0):
@@ -38,8 +44,7 @@ if (sum(~df.x2.isnull())==0):
 # non blank values in column 7. Let's try to confirm that only 
 # UNDEFs show up in column 7
 col7_vals = ~df.x1.isnull()
-print(df[col7_vals].x1.unique())
-# Output only contains 'UNDEF' so that is confirmed
+assert(df[col7_vals].x1.unique()==['UNDEF'])
 
 #determine what types of messages lead to UNDEFs
 print(df[col7_vals].message_type.unique())
@@ -86,6 +91,7 @@ start working on the given problems'''
 # Create a column of python datetime objects based on timestamp
 df['dt'] = df.timestamp.apply(lambda x: datetime.datetime.fromtimestamp(x/1e9))
 
+# main function that matches messages to get latencies
 def get_latencies(df,sent_msg_type,ids=None):
     ''' Parameters
         ------------
@@ -106,9 +112,10 @@ def get_latencies(df,sent_msg_type,ids=None):
             
         Returns
         --------
-        latencies: Pandas Series
-            Series containing all of the relevant latencies
-    '''
+        df1: Pandas DataFrame
+            Dataframe containing all relevant messages with an additional
+            column of latencies   
+        '''
     
     #Detemine matching message type that we expect from the exchange
     if sent_msg_type == 'New':
@@ -118,11 +125,11 @@ def get_latencies(df,sent_msg_type,ids=None):
     elif sent_msg_type == 'Replace':
         received_msg_type = 'Replaced'
     
-    # remove all message types that are not 'New' or "Acknowledged'
-    # or 'Rejected'
+    # remove all message types that are not of the type we expect
     df1 = df[(df.message_type == sent_msg_type) | 
              (df.message_type == received_msg_type)].copy()
              
+    # if we have passed in the optional ids, filter down to just those
     if ids is not None:
         df1 = df1[df1.clordid.isin(ids)].copy()         
     # group by clordid, diff the two timestamps and drop the NaNs
@@ -166,7 +173,7 @@ alldata_new = get_latencies(df,'New')
 alldata_replace = get_latencies(df,'Replace')
 alldata_cancel = get_latencies(df,'Cancel')
 
-
+# helper function to get descriptive statistics
 def display_stats(data,typ):
     ''' Parameters
         -------------        
@@ -203,16 +210,19 @@ def display_stats(data,typ):
           ((data.max()-data.mean())/data.std()))
     stats += [tail,(data.max()-data.mean())/data.std()]
     return stats
-    
+   
+# get the stats
 alldata_new_stats = display_stats(alldata_new.latencies.dropna(),'New')
 alldata_replace_stats = display_stats(alldata_replace.latencies.dropna(),'Replace')
 alldata_cancel_stats = display_stats(alldata_cancel.latencies.dropna(),'Cancel')
 
+''' Questions 3 and 4''' 
 
 # use Pandas time aware rolling window to aggregate over rolling 1s
 df['msg_counts']=df.rolling('1s',on='dt')['timestamp'].count()
 display_stats(df.msg_counts, 'Rolling One Second')
 
+# plot load vs time (method 1)
 fig = plt.figure()
 ax = fig.gca()
 ax.plot(df['dt'],df['msg_counts'])
@@ -220,7 +230,7 @@ ax.set_xlim(df['dt'].iloc[0],
             df['dt'].iloc[-1]+datetime.timedelta(minutes=10))
 plt.title('Method 1 (Rolling One Second Window)')
 plt.show()
-# aggregate over one second buckets on the second
+# aggregate over one second buckets starting on the second
 load = df.resample('1s',on='dt').timestamp.count()
 display_stats(load,'Discrete One Second Buckets')
 #plot the load over time as well as the boundaries for medium and large
@@ -234,9 +244,10 @@ ax.set_xlim(df['dt'].iloc[0],
 plt.title('Method 2 (Discrete One Second Buckets)')
 plt.show()
 
-#plots indicate that throughout the day there were numerous spikes of activity
+# plots indicate that throughout the day there were numerous spikes of activity
 # ranging between 1000 and 5000 msgs per second and one massive
-# spike at the close of over 20000 msgs per second
+# spike at the close of around 20000 msgs per second
+
 
 # combine load and log data
 load_df = pd.DataFrame(load)
@@ -245,6 +256,8 @@ joint_df = pd.concat([load_df,df.set_index('dt')])
 joint_df.sort_index(inplace=True)
 # forward fill the load values for times in between the seconds
 joint_df['load'] = joint_df['load'].fillna(method='ffill')
+#save a copy to use for cutoff analysis
+df_copy = joint_df.copy()
 # keep only the columns we need to use
 joint_df = joint_df[['message_type','clordid','timestamp','load']].dropna()
 
@@ -270,7 +283,6 @@ large_new_stats = display_stats(large_new.latencies.dropna(),'Large New')
 large_replace_stats = display_stats(large_replace.latencies.dropna(),'Large Replace') 
 large_cancel_stats = display_stats(large_cancel.latencies.dropna(),'Large Cancel')             
        
-
 # Create plots of latencies vs time
 alldata_new = alldata_new.set_index('dt')
 alldata_replace = alldata_replace.set_index('dt')
@@ -286,6 +298,29 @@ axes[1].set_title('Latency(ns) for Replace Messages vs Time')
 axes[2].set_title('Latency(ns) for Cancel Messages vs Time')
 plt.show()
 
+# Identify the cutoff region where latencies blow up
+cutoffs = [500,1000,2000,3000,4000,5000,10000]
+stats = []
+for cutoff in cutoffs:
+    cutoff_df = df_copy[df_copy.load < cutoff]
+    cutoff_ids = cutoff_df[cutoff_df.message_type.isin(['New','Replace','Cancel'])].clordid
+    cutoff_new = get_latencies(df_copy,'New',cutoff_ids)
+    cutoff_new_stats = display_stats(cutoff_new.latencies.dropna(),'Cutoff New')
+    stats.append([cutoff,cutoff_new_stats[1]])
+    
+# PLot latancey vs load
+loads = [x[0] for x in stats]
+means = [x[1] for x in stats]
+fig = plt.figure()
+ax = fig.gca()
+ax.plot(loads,means,label='Mean')
+plt.title('Latency vs Message Load')
+plt.xlabel('Message Load (Messages per second bucket)')
+plt.ylabel('Mean Latency (ns)')
+plt.show()
+
+''' Utility work for creating report '''
+# helper function that aggregates stats into a table and saves as csv
 def save_stats_table(fname,*args):
     '''Parameters
        -----------
@@ -302,11 +337,19 @@ def save_stats_table(fname,*args):
     '''
     
     stats = pd.DataFrame([*args]).T
+    # add row labels
     stats.index = ['Count','Mean','Median','Standard Deviation (std)',
                    'Max','Min','25th Percentile',
                    '50th Percentile','75th Percentile','90th Percentile',
                    '95th Percentile','% of latencies more than 2 std larger than mean',
                    '# of stds away from mean for max latency']
+    # add column labels
+    if fname == 'alldata':
+        stats.columns = ['New','Replace','Cancel']
+    elif fname == 'by_load':
+        index = pd.MultiIndex.from_product([['All Data','Medium Load','High Load'],
+                                            ['New','Replace','Cancel']])
+        stats.columns = index
     stats.to_csv(fname + '.csv',float_format='%.2f')
     return stats
 
