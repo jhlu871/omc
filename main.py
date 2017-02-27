@@ -86,18 +86,23 @@ start working on the given problems'''
 # Create a column of python datetime objects based on timestamp
 df['dt'] = df.timestamp.apply(lambda x: datetime.datetime.fromtimestamp(x/1e9))
 
-def get_latencies(df,sent_msg_type):
+def get_latencies(df,sent_msg_type,ids=None):
     ''' Parameters
         ------------
         df: Pandas DataFrame
             DataFrame containing the log
             
-        sent_order_type: str
+        sent_msg_type: str
             Message type that we send to exchange. Must be one of 
             'New','Cancel','Replace'
             
         received_msg_type: str
-            Message type that we received from the exchange that cor
+            Message type that we received from the exchange that
+            corresponds to the sent message type
+            
+        ids: Pandas Series of clordid ids (Optional)
+            Series of ids that we use to filter for periods of medium
+            or high load
             
         Returns
         --------
@@ -116,9 +121,10 @@ def get_latencies(df,sent_msg_type):
     # remove all message types that are not 'New' or "Acknowledged'
     # or 'Rejected'
     df1 = df[(df.message_type == sent_msg_type) | 
-             (df.message_type == received_msg_type)]
+             (df.message_type == received_msg_type)].copy()
              
-             
+    if ids is not None:
+        df1 = df1[df1.clordid.isin(ids)].copy()         
     # group by clordid, diff the two timestamps and drop the NaNs
     # There is always one NaN per group because the first timestamp has
     # nothing to diff against, which is fine since we are only interested
@@ -127,8 +133,7 @@ def get_latencies(df,sent_msg_type):
     
     # NOTE: may take some time depending on hardware
     # takes about 3 minutes on my old laptop
-    df1['latencies'] = df1.groupby('clordid').timestamp.diff()
-    
+    df1['latencies'] = df1.groupby('clordid').timestamp.transform(lambda x:x.diff())    
     #latencies = df1.groupby('clordid').timestamp.diff().dropna()
     
     # randomly test a few of the calculations to make sure behavior is 
@@ -145,7 +150,7 @@ def get_latencies(df,sent_msg_type):
     # but that's not the case. Since we are dropping any unmatched messages
     # we should see what percentage of the log is dropped
     num_sent = len(df1[df1.message_type==sent_msg_type])
-    num_received = len(df1[ (df.message_type == received_msg_type)])
+    num_received = len(df1[(df1.message_type == received_msg_type)])
     # max group size should be 2, and luckily it is for all our cases
     max_group_size = max(df1.groupby('clordid').timestamp.count())
     if max_group_size > 2:
@@ -156,6 +161,7 @@ def get_latencies(df,sent_msg_type):
           (100*abs(num_sent-num_received)/max(num_sent,num_received)))
     return df1
 
+# calculate latencies for different order types
 alldata_new = get_latencies(df,'New')
 alldata_replace = get_latencies(df,'Replace')
 alldata_cancel = get_latencies(df,'Cancel')
@@ -169,11 +175,18 @@ def display_stats(data,typ):
         
         typ: str
         Message type that we sent to the exchange
-        '''
         
-    #Change to see other percentiles
-    percentiles = [25,50,75,90,95]
+        Returns
+        --------
+        stats: list
+        List containing the relevant statistics
+        '''
+    percentiles = [25,50,75,90,95]    
+
+    stats = [data.count(),data.mean(),data.median(),data.std(),
+             data.max(),data.min()]
     print('Statistics for %s Messages' % typ)
+    print('Count: %i' % data.count())
     print('Mean: %.2f' % data.mean())
     print('Median: %i' % data.median())
     print('Std: %.2f' % data.std())
@@ -181,39 +194,127 @@ def display_stats(data,typ):
     print('Min: %i' % data.min())
     for p in percentiles:
         print('%i percentile: %i' % (p,np.percentile(data,p)))
+        stats.append(np.percentile(data,p))
     two_std = data.mean() + 2 * data.std()
     tail = sum(data > two_std)/len(data)*100
     print('Percentage of latencies more than 2 std',
           'larger than the mean: %.2f%%' % tail)
     print('# of stds max latency is away from mean: %.2f' % 
           ((data.max()-data.mean())/data.std()))
-display_stats(alldata_new.latencies.dropna(),'New')
-display_stats(alldata_replace.latencies.dropna(),'Replace')
-display_stats(alldata_cancel.latencies.dropna(),'Cancel')
+    stats += [tail,(data.max()-data.mean())/data.std()]
+    return stats
+    
+alldata_new_stats = display_stats(alldata_new.latencies.dropna(),'New')
+alldata_replace_stats = display_stats(alldata_replace.latencies.dropna(),'Replace')
+alldata_cancel_stats = display_stats(alldata_cancel.latencies.dropna(),'Cancel')
 
 
 # use Pandas time aware rolling window to aggregate over rolling 1s
 df['msg_counts']=df.rolling('1s',on='dt')['timestamp'].count()
-
 display_stats(df.msg_counts, 'Rolling One Second')
-#plot indicates that throughout the day there were numerous spikes of activity
+
+fig = plt.figure()
+ax = fig.gca()
+ax.plot(df['dt'],df['msg_counts'])
+ax.set_xlim(df['dt'].iloc[0],
+            df['dt'].iloc[-1]+datetime.timedelta(minutes=10))
+plt.title('Method 1 (Rolling One Second Window)')
+plt.show()
+# aggregate over one second buckets on the second
+load = df.resample('1s',on='dt').timestamp.count()
+display_stats(load,'Discrete One Second Buckets')
+#plot the load over time as well as the boundaries for medium and large
+fig = plt.figure()
+ax = fig.gca()
+ax.plot(load)
+ax.axhline(y=1000,c='red')
+ax.axhline(y=10000,c='red')
+ax.set_xlim(df['dt'].iloc[0],
+            df['dt'].iloc[-1]+datetime.timedelta(minutes=10))
+plt.title('Method 2 (Discrete One Second Buckets)')
+plt.show()
+
+#plots indicate that throughout the day there were numerous spikes of activity
 # ranging between 1000 and 5000 msgs per second and one massive
 # spike at the close of over 20000 msgs per second
-df.msg_counts.plot()
 
-medium_spike = df[(df.msg_counts > 1000) & (df.msg_counts < 10000)]
-large_spike = df[df.msg_counts >= 10000]
+# combine load and log data
+load_df = pd.DataFrame(load)
+load_df.rename(columns={'timestamp':'load'},inplace=True)
+joint_df = pd.concat([load_df,df.set_index('dt')])
+joint_df.sort_index(inplace=True)
+# forward fill the load values for times in between the seconds
+joint_df['load'] = joint_df['load'].fillna(method='ffill')
+# keep only the columns we need to use
+joint_df = joint_df[['message_type','clordid','timestamp','load']].dropna()
 
-medium_new = get_latencies(medium_spike,'New')
-medium_replace = get_latencies(medium_spike,'Replace')
-medium_cancel = get_latencies(medium_spike,'Cancel')
+# identify medium and large spike messages
+medium_spike = joint_df[(joint_df.load > 1000) & (joint_df.load < 10000)]
+large_spike = joint_df[joint_df.load >= 10000]
+# save the ids of the messages we send
+medium_spike_ids = medium_spike[medium_spike.message_type.isin(['New','Replace','Cancel'])].clordid
+large_spike_ids = large_spike[large_spike.message_type.isin(['New','Replace','Cancel'])].clordid
+# get the latencies of the mssages of the ids we saved
+medium_new = get_latencies(joint_df,'New',medium_spike_ids)   
+medium_replace = get_latencies(joint_df,'Replace',medium_spike_ids)   
+medium_cancel = get_latencies(joint_df,'Cancel',medium_spike_ids)   
+large_new = get_latencies(joint_df,'New',large_spike_ids)
+large_replace = get_latencies(joint_df,'Replace',large_spike_ids)
+large_cancel = get_latencies(joint_df,'Cancel',large_spike_ids)
 
-large_new = get_latencies(large_spike,'New')
-large_replace = get_latencies(large_spike,'Replace')
-large_cancel = get_latencies(large_spike,'Cancel')
+# get the stats
+medium_new_stats = display_stats(medium_new.latencies.dropna(),'Medium New')  
+medium_replace_stats = display_stats(medium_replace.latencies.dropna(),'Medium Replace')  
+medium_cancel_stats = display_stats(medium_cancel.latencies.dropna(),'Medium Cancel')                
+large_new_stats = display_stats(large_new.latencies.dropna(),'Large New')
+large_replace_stats = display_stats(large_replace.latencies.dropna(),'Large Replace') 
+large_cancel_stats = display_stats(large_cancel.latencies.dropna(),'Large Cancel')             
+       
 
-# compile a pandas dataframe of all stats for all types
-#check if rolling window is forward or backwardsa
-plt.plot(a)
-plt.axhline(y=1000)
+# Create plots of latencies vs time
+alldata_new = alldata_new.set_index('dt')
+alldata_replace = alldata_replace.set_index('dt')
+alldata_cancel = alldata_cancel.set_index('dt')
+f,axes = plt.subplots(3,1,sharex=True)
+axes[0].plot(alldata_new.latencies.dropna())
+axes[1].plot(alldata_replace.latencies.dropna())
+axes[2].plot(alldata_cancel.latencies.dropna())
+axes[0].set_xlim(alldata_new.index[0],
+            alldata_new.index[-1]+datetime.timedelta(minutes=10))
+axes[0].set_title('Latency(ns) for New Messages vs Time')
+axes[1].set_title('Latency(ns) for Replace Messages vs Time')
+axes[2].set_title('Latency(ns) for Cancel Messages vs Time')
 plt.show()
+
+def save_stats_table(fname,*args):
+    '''Parameters
+       -----------
+       fname: str
+       filename of csv to save data to
+       
+       *args: variable length lists of stats
+       lists of stats to combine together into the table
+       
+       Returns
+       -------
+       stats: Pandas DataFrame
+       Dataframe of combined stats
+    '''
+    
+    stats = pd.DataFrame([*args]).T
+    stats.index = ['Count','Mean','Median','Standard Deviation (std)',
+                   'Max','Min','25th Percentile',
+                   '50th Percentile','75th Percentile','90th Percentile',
+                   '95th Percentile','% of latencies more than 2 std larger than mean',
+                   '# of stds away from mean for max latency']
+    stats.to_csv(fname + '.csv',float_format='%.2f')
+    return stats
+
+# save first table in report    
+save_stats_table('alldata',alldata_new_stats,alldata_replace_stats,
+                     alldata_cancel_stats)
+# save second table in report
+save_stats_table('by_load',alldata_new_stats,alldata_replace_stats,
+                     alldata_cancel_stats,medium_new_stats,medium_replace_stats,
+                     medium_cancel_stats,large_new_stats,large_replace_stats,
+                     large_cancel_stats)
